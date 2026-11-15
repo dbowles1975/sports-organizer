@@ -1,0 +1,51 @@
+services:
+  sports-organizer:
+    image: ${SPORTS_ORGANIZER_IMAGE:-ghcr.io/dbowles1975/sports-organizer:latest}
+    container_name: sports-organizer
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-500}:${PGID:-100}"
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8383}:8080"
+    environment:
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env or your stack environment}
+      TMDB_READ_ACCESS_TOKEN: ${TMDB_READ_ACCESS_TOKEN:-}
+      PUSHOVER_ENABLED: ${PUSHOVER_ENABLED:-false}
+      PUSHOVER_USER_KEY: ${PUSHOVER_USER_KEY:-}
+      PUSHOVER_API_TOKEN: ${PUSHOVER_API_TOKEN:-}
+      WATCH_MODE: ${WATCH_MODE:-webhook}
+      DRY_RUN: ${DRY_RUN:-true}
+      STABLE_SECONDS: ${STABLE_SECONDS:-120}
+      POLL_SECONDS: ${POLL_SECONDS:-30}
+      NFL_INCOMING_DIR: ${NFL_INCOMING_DIR:-/nfl/DOWNLOAD}
+      NFL_DESTINATION_DIR: ${NFL_DESTINATION_DIR:-/nfl/CHIEFS}
+      UFC_INCOMING_DIR: ${UFC_INCOMING_DIR:-/ufc/DOWNLOAD}
+      UFC_DESTINATION_DIR: ${UFC_DESTINATION_DIR:-/ufc/COMPLETE}
+      DATA_DIR: /data
+      TZ: ${TZ:-America/New_York}
+    volumes:
+      # Mount each sport's parent once: downloads and complete must share a mount.
+      # Long syntax avoids silently creating directories when the NAS is absent.
+      - type: bind
+        source: ${NFL_HOST_PATH:-/mnt/nfl}
+        target: /nfl
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${UFC_HOST_PATH:-/mnt/ufc}
+        target: /ufc
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATA_HOST_PATH:?Set an existing absolute local application-data path}
+        target: /data
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 2m

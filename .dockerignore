@@ -1,0 +1,12 @@
+.env
+data
+tests
+__pycache__
+*.pyc
+README.md
+TESTING.md
+.git
+.github
+assets
+dist
+outputs

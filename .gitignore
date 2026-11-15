@@ -1,0 +1,10 @@
+.env
+data/
+__pycache__/
+*.pyc
+.env.*
+!.env.example
+*.sqlite3*
+*.log
+dist/
+work/
