@@ -21,10 +21,12 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from nfl_metadata import Plex, base_url, poster_for
 
 LOG = logging.getLogger("organizer")
-VERSION = "1.1.4"
+VERSION = "1.2.0"
 VIDEOS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts", ".webm"}
 SCHEDULE_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv"
 
@@ -296,6 +298,11 @@ class Config:
     pushover_enabled: bool = False
     pushover_user: str = ""
     pushover_token: str = ""
+    game_thumbs_url: str = ""
+    plex_url: str = ""
+    plex_token: str = ""
+    plex_nfl_library_id: str = ""
+    plex_nfl_root: str = "/nfl/CHIEFS"
 
     @classmethod
     def env(cls):
@@ -312,6 +319,11 @@ class Config:
             os.getenv("PUSHOVER_ENABLED", "false").lower() == "true",
             os.getenv("PUSHOVER_USER_KEY", ""),
             os.getenv("PUSHOVER_API_TOKEN", ""),
+            os.getenv("GAME_THUMBS_URL", ""),
+            os.getenv("PLEX_URL", ""),
+            os.getenv("PLEX_TOKEN", ""),
+            os.getenv("PLEX_NFL_LIBRARY_ID", ""),
+            os.getenv("PLEX_NFL_ROOT", "/nfl/CHIEFS"),
         )
 
 
@@ -326,6 +338,13 @@ class Organizer:
             raise ValueError("Polling and stability intervals must be positive")
         if config.pushover_enabled and not (config.pushover_user and config.pushover_token):
             raise ValueError("Pushover is enabled but credentials are missing")
+        self.game_thumbs = base_url(config.game_thumbs_url) if config.game_thumbs_url else ""
+        plex_settings = (config.plex_url, config.plex_token, config.plex_nfl_library_id)
+        if any(plex_settings) and not all(plex_settings):
+            raise ValueError("Set PLEX_URL, PLEX_TOKEN and PLEX_NFL_LIBRARY_ID together")
+        self.plex = Plex(*plex_settings) if all(plex_settings) else None
+        if self.plex and (not config.plex_nfl_root.startswith("/") or ".." in config.plex_nfl_root.split("/")):
+            raise ValueError("PLEX_NFL_ROOT must be an absolute Plex container path")
         config.data.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.db = sqlite3.connect(config.data / "history.sqlite3", check_same_thread=False)
@@ -342,6 +361,16 @@ class Organizer:
         if "destination_fingerprint" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN destination_fingerprint TEXT")
             self.db.commit()
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        for name, definition in (
+            ("metadata", "TEXT NOT NULL DEFAULT 'none'"),
+            ("metadata_attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("metadata_after", "REAL NOT NULL DEFAULT 0"),
+            ("metadata_error", "TEXT"),
+        ):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+        self.db.commit()
         self.seen = {}
         self.stop = threading.Event()
         self.wake = threading.Event()
@@ -353,6 +382,9 @@ class Organizer:
         self.recover()
 
     def update(self, job_id, **values):
+        if values.get("status") == "completed" and not self.c.dry_run and (self.game_thumbs or self.plex):
+            if self.get_job(job_id)["sport"] == "nfl":
+                values["metadata"] = "pending"
         values["updated"] = time.time()
         with self.lock:
             self.db.execute("UPDATE jobs SET " + ", ".join(k + "=?" for k in values) + " WHERE id=?",
@@ -609,6 +641,53 @@ class Organizer:
                         notify_attempts=attempts, notify_after=time.time() + min(3600, 60 * 2 ** attempts))
             LOG.warning("Pushover attempt %s failed for job %s; video remains completed", attempts, job["id"])
 
+    def retry_metadata(self, job_id):
+        if self.c.dry_run or not (self.game_thumbs or self.plex):
+            raise ValueError("Metadata requires DRY_RUN=false and a configured provider")
+        with self.lock:
+            job = self.get_job(job_id)
+            if job["sport"] != "nfl" or job["status"] != "completed":
+                raise ValueError("Metadata retry requires a completed NFL job")
+            if job["metadata"] != "pending":
+                self.update(job_id, metadata="pending", metadata_attempts=0, metadata_after=0, metadata_error=None)
+        self.wake.set()
+        return self.get_job(job_id)
+
+    def enrich(self, job):
+        if self.c.dry_run or not (self.game_thumbs or self.plex):
+            return
+        try:
+            destination = Path(job["destination"])
+            root = self.c.routes["nfl"][1]
+            if (not destination.is_file() or destination.is_symlink() or
+                    destination.parent.parent.resolve() != root.resolve() or destination.parent.is_symlink()):
+                raise ValueError("Completed NFL video is missing or outside the configured destination")
+            game_date, _, _ = nfl_parts(job["filename"])
+            title = destination.stem
+            matchup = title.rsplit(" - ", 1)[-1].split(" at ", 1)
+            if len(matchup) != 2:
+                raise ValueError("Completed NFL filename has no recognized matchup")
+            poster = None
+            artwork_error = None
+            if self.game_thumbs:
+                try:
+                    poster = poster_for(destination.parent, self.game_thumbs, *matchup)
+                except Exception as exc:
+                    artwork_error = self.error_text(exc)
+            if self.plex:
+                target = str(PurePosixPath(self.c.plex_nfl_root) / destination.parent.name / destination.name)
+                self.plex.update_game(target, title, game_date, poster)
+            if artwork_error:
+                raise ValueError("Artwork: " + artwork_error)
+            self.update(job["id"], metadata="completed", metadata_error=None)
+        except Exception as exc:
+            attempts = job["metadata_attempts"] + 1
+            error = self.error_text(exc)
+            self.update(job["id"], metadata="pending" if attempts < 6 else "failed",
+                        metadata_attempts=attempts, metadata_after=time.time() + min(300, 15 * 2 ** (attempts - 1)),
+                        metadata_error=error)
+            LOG.warning("NFL metadata job %s attempt %s: %s", job["id"], attempts, error)
+
     def poll(self):
         now = time.monotonic()
         present = set()
@@ -675,6 +754,13 @@ class Organizer:
             rows = self.db.execute("SELECT * FROM jobs WHERE status='completed' AND notification='pending' AND notify_after<=? LIMIT 10", (time.time(),)).fetchall()
         for row in rows:
             self.notify(dict(row))
+        if not self.c.dry_run and (self.game_thumbs or self.plex):
+            with self.lock:
+                job = self.db.execute(
+                    "SELECT * FROM jobs WHERE status='completed' AND metadata='pending' AND metadata_after<=? "
+                    "ORDER BY metadata_after, id LIMIT 1", (time.time(),)).fetchone()
+            if job:
+                self.enrich(dict(job))
 
     def start(self):
         def loop():
@@ -766,6 +852,10 @@ def handler_for(service):
                         with service.lock:
                             service.poll()
                         self.respond(202, {"message": "Scan complete; files must satisfy the stability interval before queueing"})
+                        return
+                    match = re.fullmatch(r"/jobs/(\d+)/retry-metadata", path)
+                    if match:
+                        self.respond(202, service.retry_metadata(int(match[1])))
                         return
                     match = re.fullmatch(r"/jobs/(\d+)/retry", path)
                     if match:

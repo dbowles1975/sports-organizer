@@ -4,7 +4,7 @@
 
 Organize completed NFL and UFC video copies into consistently named event folders on a NAS. Accepts Sportarr completion webhooks, offers polling, exposes an authenticated JSON API, and sends Pushover notifications after successful moves.
 
-**Current release: 1.1.4.** No web GUI or Plex metadata automation yet; see [ROADMAP.md](ROADMAP.md).
+**Source version: 1.2.0.** Optional NFL poster and Plex metadata automation is available. Build this source locally to use it before publishing an image.
 
 ## Folder routes and naming
 
@@ -104,7 +104,55 @@ For command-line Compose, clone/download the repository, copy `.env.example` to 
 
 Keep the current mounts, credentials, UID/GID, data directory, port, and network settings. Change only the image to the GHCR tag, remove any `build: .` and `pull_policy: never`, and redeploy with pulling enabled. Never replace the live `.env` with example settings. Stop the service before backing up its local data directory. A container restart alone does not load a newly pulled image: recreate/redeploy it.
 
-Health/startup logs show version 1.1.4. Existing completed files are not renamed; review/previewed jobs still need explicit retry. A failed notification does not undo a successful move. To pause processing, stop the container.
+Health and startup logs identify the image version. Existing completed files are not renamed; review/previewed jobs still need explicit retry. A failed notification does not undo a successful move. To pause processing, stop the container.
+
+## NFL posters and Plex metadata
+
+Build on the Docker host from this directory:
+
+```sh
+docker build -t sports-organizer:1.2.0-local .
+```
+
+In the existing Portainer stack set `SPORTS_ORGANIZER_IMAGE=sports-organizer:1.2.0-local`
+(or replace the current image value if it is literal). Add the following environment
+entries to the service if deploying from an older stack definition. Keep the current
+mounts, network, and data directory. Disable the option to pull the image when
+redeploying a locally built tag.
+
+| Setting | Value |
+| --- | --- |
+| `GAME_THUMBS_URL` | Base URL reachable by Sports Organizer, including the port if needed. |
+| `PLEX_URL` | Plex server base URL reachable by Sports Organizer, such as `http://192.168.50.10:32400`. |
+| `PLEX_TOKEN` | Plex server-owner token. Store privately. |
+| `PLEX_NFL_LIBRARY_ID` | Numeric section ID for the NFL **Movies** library. Plex Web can show it as `source=server://…/library/sections/ID` or `key=/library/sections/ID` in the URL. |
+| `PLEX_NFL_ROOT` | NFL destination as seen by Plex. Defaults to `/nfl/CHIEFS`. |
+
+Configure Game Thumbs, Plex, or both. Providers run for completed NFL moves with
+`DRY_RUN=false`. Game Thumbs uses style 99 and saves JPEG or PNG artwork alongside
+the video. The Plex update finds the movie by its full mapped file path, requests
+a folder scan if needed, and writes the title, sort title, game date, rating and
+studio. Existing locked fields and artwork are preserved. The library must use
+the Movies type. Optional artwork and metadata failures appear separately from the
+completed move in job history.
+
+To update one previously completed game, look up its ID in `GET /jobs` and call
+`POST /jobs/ID/retry-metadata` with the organizer API token. The job must still
+reference the existing video. There is no need to re-download or move the video.
+
+```sh
+read -rsp 'Sports Organizer API token: ' ORGANIZER_TOKEN
+printf '\n'
+JOB_ID=123
+curl --fail-with-body --max-time 10 -X POST \
+  -H "Authorization: Bearer $ORGANIZER_TOKEN" \
+  "http://127.0.0.1:8383/jobs/$JOB_ID/retry-metadata"
+unset ORGANIZER_TOKEN
+```
+
+In the job response, `status` tracks the move and `metadata` tracks enrichment.
+Use `GET /jobs/ID` to check for `metadata=completed` or read `metadata_error`.
+Transient failures retry with backoff. Manual retry can be used after a failure.
 
 ## QNAP permissions
 
