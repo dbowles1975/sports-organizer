@@ -1,4 +1,11 @@
-# Sports Organizer 1.1.4
+# Sports Organizer 1.2.1
+
+- Adds Plex Edition without the season-year prefix.
+- Adds spoiler-free NFL summaries with Wikipedia game details for Chiefs games when available, and nflverse as a fallback.
+- Adds the opponent and Kansas City's actual starting quarterback to Plex Collections while preserving existing entries.
+- Supports metadata retries on completed games without moving the video again.
+
+## Sports Organizer 1.1.4
 
 First GitHub/GHCR release of the previously tested local organizer.
 

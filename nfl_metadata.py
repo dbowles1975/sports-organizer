@@ -5,7 +5,77 @@ import tempfile
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import date
+from functools import lru_cache
+from html.parser import HTMLParser
 from pathlib import PurePosixPath
+
+
+class SeasonGameDetails(HTMLParser):
+    """Read only labeled game details from sections of a season article."""
+
+    fields = re.compile(r"^(Date|Game time|Game weather|Game attendance|Referee|"
+                        r"TV announcers(?:\s*\([^)]*\))?):\s*(.+)$", re.I)
+
+    def __init__(self):
+        super().__init__()
+        self.sections = []
+        self.heading = None
+        self.item = None
+        self.active = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"h2", "h3", "h4", "h5", "h6"}:
+            self.heading = []
+        elif tag == "li" and self.active is not None:
+            self.item = []
+
+    def handle_data(self, data):
+        if self.heading is not None:
+            self.heading.append(data)
+        if self.item is not None:
+            self.item.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in {"h2", "h3", "h4", "h5", "h6"} and self.heading is not None:
+            self.active = {}
+            self.sections.append((" ".join("".join(self.heading).split()), self.active))
+            self.heading = None
+            self.item = None
+        elif tag == "li" and self.item is not None:
+            match = self.fields.fullmatch(" ".join("".join(self.item).split()))
+            if match:
+                label, value = match.groups()
+                self.active[label.lower()] = (label, value)
+            self.item = None
+
+
+@lru_cache(maxsize=8)
+def chiefs_season_details(season, refresh_day):
+    url = f"https://en.wikipedia.org/wiki/{season}_Kansas_City_Chiefs_season"
+    request = urllib.request.Request(url, headers={"User-Agent": "SportsOrganizer/1.2 (https://github.com/dbowles1975/sports-organizer)"})
+    with urllib.request.urlopen(request, timeout=8) as response:
+        html = response.read(6_000_001)
+    if len(html) > 6_000_000:
+        raise ValueError("Wikipedia season article exceeds size limit")
+    parser = SeasonGameDetails()
+    parser.feed(html.decode("utf-8"))
+    parser.close()
+    return parser.sections
+
+
+def chiefs_game_details(season, game_date, opponent):
+    played = date.fromisoformat(game_date)
+    month_day = f"{played:%B} {played.day}"
+    matches = []
+    for heading, fields in chiefs_season_details(season, date.today()):
+        if not re.search(rf"\b{re.escape(opponent)}\b", heading, re.I):
+            continue
+        published = fields.get("date", ("", ""))[1]
+        if published.casefold() not in {month_day.casefold(), f"{month_day}, {played.year}".casefold()}:
+            continue
+        matches.append(fields)
+    return matches[0] if len(matches) == 1 else {}
 
 
 def base_url(value):
@@ -97,7 +167,7 @@ class Plex:
             raise ValueError("More than one Plex movie matches the exact file path")
         return matched[0] if matched else None
 
-    def update_game(self, target, title, game_date, poster):
+    def update_game(self, target, title, game_date, poster, *, summary=None, basic_summary=None, collections=()):
         target = PurePosixPath(target)
         video = self.find_video(str(target))
         if video is None:
@@ -113,11 +183,29 @@ class Plex:
         locked = {field.get("name") for field in details.findall("Field") if field.get("locked") == "1"}
         values = {"title": title, "titleSort": title, "originallyAvailableAt": game_date,
                   "contentRating": "E", "studio": "NFL"}
+        edition = re.sub(r"^[0-9]{4} - ", "", title)
+        if edition != title:
+            values["editionTitle"] = edition
+        if summary:
+            values["summary"] = summary
         changes = {}
         for field, value in values.items():
-            if field not in locked:
+            upgrade_summary = field == "summary" and basic_summary and details.get("summary") == basic_summary
+            if field not in locked or upgrade_summary:
                 changes[field + ".value"] = value
                 changes[field + ".locked"] = 1
+        if collections:
+            existing = [node.attrib["tag"] for node in details.findall("Collection") if node.get("tag")]
+            original_count = len(existing)
+            seen = {name.casefold() for name in existing}
+            for name in collections:
+                if name.casefold() not in seen:
+                    existing.append(name)
+                    seen.add(name.casefold())
+            if len(existing) > original_count:
+                changes["collection.locked"] = 1
+                for index, name in enumerate(existing):
+                    changes[f"collection[{index}].tag.tag"] = name
         if changes:
             self.request(self.section + "/all", {"id": key, "type": 1, **changes}, method="PUT")
         if poster is not None and "thumb" not in locked and "poster" not in locked:

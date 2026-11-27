@@ -4,7 +4,7 @@
 
 Organize completed NFL and UFC video copies into consistently named event folders on a NAS. Accepts Sportarr completion webhooks, offers polling, exposes an authenticated JSON API, and sends Pushover notifications after successful moves.
 
-**Source version: 1.2.0.** Optional NFL poster and Plex metadata automation is available. Build this source locally to use it before publishing an image.
+**Source version: 1.2.1.** Optional NFL poster and Plex metadata automation is available.
 
 ## Folder routes and naming
 
@@ -111,10 +111,10 @@ Health and startup logs identify the image version. Existing completed files are
 Build on the Docker host from this directory:
 
 ```sh
-docker build -t sports-organizer:1.2.0-local .
+docker build -t sports-organizer:1.2.1-local .
 ```
 
-In the existing Portainer stack set `SPORTS_ORGANIZER_IMAGE=sports-organizer:1.2.0-local`
+In the existing Portainer stack set `SPORTS_ORGANIZER_IMAGE=sports-organizer:1.2.1-local`
 (or replace the current image value if it is literal). Add the following environment
 entries to the service if deploying from an older stack definition. Keep the current
 mounts, network, and data directory. Disable the option to pull the image when
@@ -132,7 +132,12 @@ Configure Game Thumbs, Plex, or both. Providers run for completed NFL moves with
 `DRY_RUN=false`. Game Thumbs uses style 99 and saves JPEG or PNG artwork alongside
 the video. The Plex update finds the movie by its full mapped file path, requests
 a folder scan if needed, and writes the title, sort title, game date, rating and
-studio. Existing locked fields and artwork are preserved. The library must use
+studio. The Edition removes the leading season year. The Summary includes
+spoiler-free game details, with Wikipedia kickoff, conditions, attendance,
+referee, and TV announcers for Chiefs games when available. Chiefs games add the
+opponent and Kansas City's starting quarterback to existing Collections when
+the data is available. Existing locked fields and artwork are preserved, with
+previously generated basic summaries eligible for the fuller preview. The library must use
 the Movies type. Optional artwork and metadata failures appear separately from the
 completed move in job history.
 
@@ -251,4 +256,4 @@ Do not include real credentials, SQLite state, NAS files, or runtime logs in com
 - [Pushover API](https://pushover.net/api). Upload [the 128x128 transparent icon](assets/pushover-icon-128.png) in your application's settings.
 - [Sportarr naming](https://wiki.sportarr.net/features/file-naming/) and [notifications](https://wiki.sportarr.net/features/notifications/).
 
-Game Thumbs, TheSportsDB artwork, and Plex editing are roadmap items, not active integrations in this release.
+TheSportsDB artwork remains on the roadmap.

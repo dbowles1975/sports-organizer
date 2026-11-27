@@ -23,10 +23,10 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 
-from nfl_metadata import Plex, base_url, poster_for
+from nfl_metadata import Plex, base_url, chiefs_game_details, poster_for
 
 LOG = logging.getLogger("organizer")
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 VIDEOS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts", ".webm"}
 SCHEDULE_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv"
 
@@ -130,7 +130,7 @@ def nfl_parts(filename):
     return dates.pop(), away, home
 
 
-def nfl_title(filename, rows):
+def nfl_game(filename, rows):
     gameday, away, home = nfl_parts(filename)
     matches = []
     for row in rows:
@@ -146,7 +146,11 @@ def nfl_title(filename, rows):
             continue
     if len(matches) != 1:
         raise ValueError("No unique schedule match for that date and those teams")
-    row = matches[0]
+    return matches[0], away, home
+
+
+def nfl_title(filename, rows):
+    row, away, home = nfl_game(filename, rows)
     if is_sportarr_filename(filename):
         # Use the schedule's official away/home designations for neutral-site
         # games too; Sportarr's display order must never dictate output order.
@@ -165,6 +169,44 @@ def nfl_title(filename, rows):
     else:
         raise ValueError(f"Unsupported game type: {kind}")
     return safe_name(f"{season} - {label} - {SHORT[away]} at {SHORT[home]}")
+
+
+def nfl_preview(row, away, home, game_details=None):
+    venue = (row.get("stadium") or "").strip()
+    neutral = row.get("location") == "Neutral"
+    matchup = f"{SHORT[away]} vs. {SHORT[home]}" if neutral else f"{SHORT[away]} at {SHORT[home]}"
+    preview = f"{matchup} on {row['gameday']}"
+    if venue:
+        preview += f" at {venue}"
+    details = [preview + "."]
+    roof = (row.get("roof") or "").strip().lower()
+    venue_conditions = {"dome": "Indoor venue", "closed": "Roof closed", "open": "Roof open",
+                        "outdoors": "Outdoor venue"}
+    conditions = [venue_conditions[roof]] if roof in venue_conditions else []
+    if roof not in {"dome", "closed"}:
+        temperature = (row.get("temp") or "").strip()
+        wind = (row.get("wind") or "").strip()
+        if re.fullmatch(r"-?[0-9]+", temperature):
+            conditions.append(f"{temperature} °F")
+        if wind.isdecimal():
+            conditions.append(f"wind {wind} mph")
+    if game_details:
+        lines = [venue or matchup, "", f"Date: {row['gameday']}"]
+        for label in ("game time", "game weather", "game attendance", "referee"):
+            if label in game_details:
+                name, value = game_details[label]
+                lines.append(f"{name}: {value}")
+            elif label == "game weather" and conditions:
+                lines.append(f"Game conditions: {', '.join(conditions)}")
+        for label, (name, value) in game_details.items():
+            if label.startswith("tv announcers"):
+                lines.append(f"{name}: {value}")
+        lines.extend(["", "Sources: Wikipedia and nflverse."])
+        return "\n".join(lines)
+    if conditions:
+        details.append(", ".join(conditions) + ".")
+    details.append("Source: nflverse.")
+    return " ".join(details)
 
 
 def ufc_number(filename):
@@ -676,7 +718,35 @@ class Organizer:
                     artwork_error = self.error_text(exc)
             if self.plex:
                 target = str(PurePosixPath(self.c.plex_nfl_root) / destination.parent.name / destination.name)
-                self.plex.update_game(target, title, game_date, poster)
+                summary = None
+                basic_summary = None
+                collections = []
+                game_error = None
+                try:
+                    row, _, _ = nfl_game(job["filename"], self.schedule_rows())
+                    away, home = team(row["away_team"]), team(row["home_team"])
+                    details = {}
+                    if "KC" in (away, home):
+                        side, opponent = ("away", home) if away == "KC" else ("home", away)
+                        collections.append(SHORT[opponent])
+                        starter = (row.get(side + "_qb_name") or "").strip()
+                        if starter:
+                            collections.append(starter)
+                        else:
+                            game_error = "Kansas City's starting quarterback is unavailable in nflverse"
+                        try:
+                            details = chiefs_game_details(int(row["season"]), game_date, SHORT[opponent])
+                        except (OSError, ValueError):
+                            LOG.info("Wikipedia game details unavailable for NFL job %s", job["id"])
+                    summary = nfl_preview(row, away, home, details)
+                    if details:
+                        basic_summary = nfl_preview(row, away, home)
+                except ValueError as exc:
+                    game_error = str(exc)
+                self.plex.update_game(target, title, game_date, poster, summary=summary,
+                                      basic_summary=basic_summary, collections=collections)
+                if game_error:
+                    raise ValueError(game_error)
             if artwork_error:
                 raise ValueError("Artwork: " + artwork_error)
             self.update(job["id"], metadata="completed", metadata_error=None)
