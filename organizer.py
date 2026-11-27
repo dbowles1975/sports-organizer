@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from nfl_metadata import Plex, base_url, chiefs_game_details, poster_for
 
 LOG = logging.getLogger("organizer")
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 VIDEOS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts", ".webm"}
 SCHEDULE_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv"
 
@@ -442,6 +442,16 @@ class Organizer:
     def jobs(self, limit=100):
         with self.lock:
             return [dict(row) for row in self.db.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def job_counts(self):
+        with self.lock:
+            row = self.db.execute("""
+                SELECT COUNT(CASE WHEN status = 'completed' AND metadata <> 'pending' THEN 1 END) AS completed,
+                       COUNT(CASE WHEN status IN ('queued', 'moving')
+                                   OR (status = 'completed' AND metadata = 'pending') THEN 1 END) AS active
+                FROM jobs
+            """).fetchone()
+        return dict(row)
 
     def get_job(self, job_id):
         with self.lock:
@@ -999,6 +1009,9 @@ def handler_for(service):
                         return
                     if path == "/jobs":
                         self.respond(200, {"jobs": service.jobs()})
+                        return
+                    if path == "/jobs/summary":
+                        self.respond(200, service.job_counts())
                         return
                     match = re.fullmatch(r"/jobs/(\d+)", path)
                     if match:

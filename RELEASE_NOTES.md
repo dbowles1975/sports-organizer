@@ -1,4 +1,8 @@
-# Sports Organizer 1.3.0
+# Sports Organizer 1.3.1
+
+- Adds the authenticated `GET /jobs/summary` endpoint for completed and active job totals in compact dashboard widgets.
+
+## Sports Organizer 1.3.0
 
 - Adds a web dashboard for service health, rename previews, job history, and retries.
 - Adds read-only Plex previews and selected updates for existing Chiefs games. Backfill preserves video files, existing posters and collections, and manually entered metadata.

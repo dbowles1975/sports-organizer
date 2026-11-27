@@ -4,7 +4,7 @@
 
 Organize completed NFL and UFC video copies into consistently named event folders on a NAS. Accepts Sportarr completion webhooks, offers polling, exposes an authenticated JSON API, and sends Pushover notifications after successful moves.
 
-**Source version: 1.3.0.** Includes a web dashboard and Plex backfill for existing Chiefs games.
+**Source version: 1.3.1.** Includes a web dashboard and Plex backfill for existing Chiefs games.
 
 ## Folder routes and naming
 
@@ -220,6 +220,7 @@ All endpoints require `Authorization: Bearer <API_TOKEN>`. Use http://127.0.0.1:
 | --- | --- | --- |
 | GET | `/health` | Version, mode, worker, directory status; does not validate provider credentials |
 | GET | `/jobs` | Latest 100 jobs including errors and notifications |
+| GET | `/jobs/summary` | Counts of completed jobs and active jobs, including pending metadata |
 | GET | `/jobs/ID` | One job |
 | POST | `/preview` | JSON sport and filename; proposed name/path without moving |
 | POST | `/webhooks/complete` | sport, filename, transfer_complete=true |
