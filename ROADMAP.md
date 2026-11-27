@@ -17,7 +17,7 @@ Checked items are implemented. Unchecked items are planned and are not included 
 
 ## Dashboard and usability
 
-- [ ] Authenticated web dashboard backed by the existing API.
+- [x] Authenticated web dashboard backed by the existing API.
 - [ ] Logo in the dashboard and favicon derived from the transparent icon.
 - [ ] Copy/verification byte progress and clear per-stage status.
 - [ ] Job previews, errors, retry buttons, filtering and history.

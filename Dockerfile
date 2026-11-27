@@ -4,7 +4,7 @@ LABEL org.opencontainers.image.title="Sports Organizer" \
       org.opencontainers.image.description="Organize NFL and UFC videos with Sportarr webhooks and Pushover notifications"
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
-COPY organizer.py nfl_metadata.py /app/
+COPY organizer.py nfl_metadata.py dashboard.html /app/
 RUN mkdir -p /data && chown 500:100 /data
 USER 500:100
 EXPOSE 8080

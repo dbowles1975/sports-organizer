@@ -4,6 +4,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
+from xml.etree import ElementTree as ET
 
 from nfl_metadata import Plex, SeasonGameDetails, chiefs_game_details, poster_for
 from organizer import Config, Organizer, nfl_preview
@@ -11,6 +12,38 @@ from test_organizer import game
 
 
 class MetadataTests(unittest.TestCase):
+    def test_backfill_previews_without_writing_and_preserves_manual_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(root / "data", {"nfl": (root, root)}, "x" * 24, dry_run=False,
+                            plex_nfl_root="/nfl/CHIEFS")
+            with closing(Organizer(config)) as service:
+                service.plex = Plex("http://plex:32400", "secret", "23")
+                video = ET.fromstring(
+                    '<Video ratingKey="20" librarySectionID="23" title="Manual title" summary="Manual summary">'
+                    '<Media><Part file="/nfl/CHIEFS/2026 - Week 09 - Jets at Chiefs.mkv"/></Media>'
+                    '<Collection tag="Favorites"/></Video>'
+                )
+                row = dict(game(week="9"), home_qb_name="Patrick Mahomes")
+                service.schedule_rows = Mock(return_value=[row])
+                service.plex.videos_page = Mock(return_value=([video], 1))
+                service.plex.game_details = Mock(return_value=video)
+                service.plex.apply_game_changes = Mock()
+                with patch("organizer.chiefs_game_details", return_value={}):
+                    item = service.backfill_preview(0)["items"][0]
+                    self.assertEqual(item["changes"]["editionTitle.value"], "Week 09 - Jets at Chiefs")
+                    self.assertNotIn("title.value", item["changes"])
+                    self.assertNotIn("summary.value", item["changes"])
+                    self.assertEqual(item["changes"]["collection[0].tag.tag"], "Favorites")
+                    service.plex.apply_game_changes.assert_not_called()
+                    video.set("editionTitle", "Manual edition")
+                    with self.assertRaisesRegex(ValueError, "Preview this item again"):
+                        service.backfill_apply("20", item["signature"])
+                    service.plex.apply_game_changes.assert_not_called()
+                    del video.attrib["editionTitle"]
+                    self.assertEqual(service.backfill_apply("20", item["signature"])["status"], "updated")
+                    service.plex.apply_game_changes.assert_called_once()
+
     def test_wikipedia_details_match_date_and_ignore_scores(self):
         parser = SeasonGameDetails()
         parser.feed("""<h4>Week 10: at Atlanta Falcons</h4><table><tr><td>35–13</td></tr></table>

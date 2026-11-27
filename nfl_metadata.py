@@ -149,19 +149,23 @@ class Plex:
         with self.opener.open(request, timeout=15) as response:
             return response.read()
 
+    def videos_page(self, start, size=100):
+        data = self.request(self.section + "/all", {
+            "type": 1, "X-Plex-Container-Start": start, "X-Plex-Container-Size": size,
+        })
+        page = ET.fromstring(data)
+        videos = page.findall("Video")
+        return videos, int(page.get("totalSize", str(start + len(videos))))
+
     def find_video(self, file_path):
         start = 0
         matched = []
         while True:
-            data = self.request(self.section + "/all", {
-                "type": 1, "X-Plex-Container-Start": start, "X-Plex-Container-Size": 100,
-            })
-            page = ET.fromstring(data)
-            videos = page.findall("Video")
+            videos, total = self.videos_page(start)
             matched.extend(video for video in videos if any(
                 part.get("file") == file_path for part in video.findall("Media/Part")))
             start += len(videos)
-            if not videos or start >= int(page.get("totalSize", str(start))):
+            if not videos or start >= total:
                 break
         if len(matched) > 1:
             raise ValueError("More than one Plex movie matches the exact file path")
@@ -174,12 +178,19 @@ class Plex:
             self.request(self.section + "/refresh", {"path": str(target.parent)}, method="POST")
             raise ValueError("Waiting for Plex to discover the file in the configured NFL movie library")
         key = video.get("ratingKey", "")
+        self.write_game(key, title, game_date, poster, summary=summary, basic_summary=basic_summary,
+                        collections=collections)
+
+    def game_details(self, key):
         if not re.fullmatch(r"[1-9][0-9]*", key):
             raise ValueError("Plex returned an invalid movie ID")
-        item_path = "/library/metadata/" + key
-        details = ET.fromstring(self.request(item_path)).find("Video")
+        details = ET.fromstring(self.request("/library/metadata/" + key)).find("Video")
         if details is None:
             raise ValueError("Plex entry disappeared before the update")
+        return details
+
+    def game_changes(self, details, title, game_date, *, summary=None, basic_summary=None, collections=(),
+                     preserve_existing=False):
         locked = {field.get("name") for field in details.findall("Field") if field.get("locked") == "1"}
         values = {"title": title, "titleSort": title, "originallyAvailableAt": game_date,
                   "contentRating": "E", "studio": "NFL"}
@@ -191,6 +202,9 @@ class Plex:
         changes = {}
         for field, value in values.items():
             upgrade_summary = field == "summary" and basic_summary and details.get("summary") == basic_summary
+            if preserve_existing and (field not in {"editionTitle", "summary"} or
+                                      (details.get(field) and not upgrade_summary)):
+                continue
             if field not in locked or upgrade_summary:
                 changes[field + ".value"] = value
                 changes[field + ".locked"] = 1
@@ -206,8 +220,21 @@ class Plex:
                 changes["collection.locked"] = 1
                 for index, name in enumerate(existing):
                     changes[f"collection[{index}].tag.tag"] = name
+        return changes, locked
+
+    def write_game(self, key, title, game_date, poster, *, summary=None, basic_summary=None, collections=()):
+        details = self.game_details(key)
+        changes, locked = self.game_changes(details, title, game_date, summary=summary,
+                                            basic_summary=basic_summary, collections=collections)
+        self.apply_game_changes(key, changes)
+        if poster is not None and "thumb" not in locked and "poster" not in locked:
+            self.upload_poster(key, poster)
+
+    def upload_poster(self, key, poster):
+        content_type = "image/png" if poster.suffix == ".png" else "image/jpeg"
+        self.request("/library/metadata/" + key + "/posters", method="POST",
+                     data=poster.read_bytes(), content_type=content_type)
+
+    def apply_game_changes(self, key, changes):
         if changes:
             self.request(self.section + "/all", {"id": key, "type": 1, **changes}, method="PUT")
-        if poster is not None and "thumb" not in locked and "poster" not in locked:
-            content_type = "image/png" if poster.suffix == ".png" else "image/jpeg"
-            self.request(item_path + "/posters", method="POST", data=poster.read_bytes(), content_type=content_type)

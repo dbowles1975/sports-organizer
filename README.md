@@ -4,7 +4,7 @@
 
 Organize completed NFL and UFC video copies into consistently named event folders on a NAS. Accepts Sportarr completion webhooks, offers polling, exposes an authenticated JSON API, and sends Pushover notifications after successful moves.
 
-**Source version: 1.2.1.** Optional NFL poster and Plex metadata automation is available.
+**Source version: 1.3.0.** Includes a web dashboard and Plex backfill for existing Chiefs games.
 
 ## Folder routes and naming
 
@@ -111,10 +111,10 @@ Health and startup logs identify the image version. Existing completed files are
 Build on the Docker host from this directory:
 
 ```sh
-docker build -t sports-organizer:1.2.1-local .
+docker build -t sports-organizer:1.3.0-local .
 ```
 
-In the existing Portainer stack set `SPORTS_ORGANIZER_IMAGE=sports-organizer:1.2.1-local`
+In the existing Portainer stack set `SPORTS_ORGANIZER_IMAGE=sports-organizer:1.3.0-local`
 (or replace the current image value if it is literal). Add the following environment
 entries to the service if deploying from an older stack definition. Keep the current
 mounts, network, and data directory. Disable the option to pull the image when
@@ -200,6 +200,19 @@ Call only after the file is closed and finished. Prefer copying as `filename.mkv
 Polling deduplicates unchanged files: putting back the same file may return an existing review job rather than queue another move. Retry that job explicitly. A changed source creates a new job. `POST /scan` is only one stability observation; in webhook-only mode it needs another observation after the interval.
 
 ## API
+
+Open `http://127.0.0.1:8383/` on the Docker host to use the dashboard. Sign
+in with the Sports Organizer API token. The dashboard keeps it in the current
+page's memory and clears it when you sign out or close the tab. Use HTTPS if you
+access the dashboard over a network.
+
+To update existing Chiefs games, select **Preview library**. The preview is
+read-only and matches the video filename to the NFL schedule. Select the games
+you want and click **Apply selected**. Backfill fills missing Edition and
+Summary fields, can upgrade the old generated summary, adds missing Collections,
+and can add a Game Thumbs poster if Plex reports none. Existing manual values,
+posters, and video files are preserved. Applying changes requires
+`DRY_RUN=false`. If a Plex item changes after preview, preview it again.
 
 All endpoints require `Authorization: Bearer <API_TOKEN>`. Use http://127.0.0.1:8383 from the Docker host, or your configured reachable host address. A normal browser address-bar visit does not attach a bearer token. JSON request bodies are limited to 8192 bytes.
 

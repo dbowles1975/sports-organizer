@@ -1,4 +1,10 @@
-# Sports Organizer 1.2.1
+# Sports Organizer 1.3.0
+
+- Adds a web dashboard for service health, rename previews, job history, and retries.
+- Adds read-only Plex previews and selected updates for existing Chiefs games. Backfill preserves video files, existing posters and collections, and manually entered metadata.
+- Keeps the existing data mount and API token when upgrading.
+
+## Sports Organizer 1.2.1
 
 - Adds Plex Edition without the season-year prefix.
 - Adds spoiler-free NFL summaries with Wikipedia game details for Chiefs games when available, and nflverse as a fallback.
@@ -30,4 +36,4 @@ The first startup adds no new NAS operations by itself. Existing review/previewe
 
 ## Not included yet
 
-The web GUI, Game Thumbs/TheSportsDB artwork downloads, Plex metadata editing, notification-type controls, and historical backfill are tracked in ROADMAP.md and are not implemented in this release.
+See ROADMAP.md for remaining work.

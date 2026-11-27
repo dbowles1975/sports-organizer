@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sports Organizer</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui; background: #101827; color: #eef4ff; }
+  body { max-width: 74rem; margin: auto; padding: 1.5rem; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  section { background: #1a263b; padding: 1rem; margin: 1rem 0; border-radius: .65rem; }
+  h1, h2 { margin: 0 0 .6rem; }
+  form { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; }
+  label { display: grid; gap: .25rem; }
+  button, input, select { font: inherit; border-radius: .35rem; border: 1px solid #72839d; padding: .4rem .65rem; }
+  button { background: #a9d8ff; color: #102039; cursor: pointer; }
+  :focus-visible { outline: 3px solid #ffd77a; outline-offset: 2px; }
+  table { width: 100%; border-collapse: collapse; text-align: left; }
+  th, td { padding: .55rem; border-bottom: 1px solid #72839d; vertical-align: top; overflow-wrap: anywhere; }
+  .table { overflow-x: auto; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+<header><h1>Sports Organizer</h1><button id="signout" hidden>Sign out</button></header>
+<form id="signin">
+  <label>Sports Organizer API token <input name="token" type="password" required autocomplete="off"></label>
+  <button>Sign in</button>
+</form>
+<p id="message" role="status"></p>
+<main id="dashboard" hidden>
+  <section><h2>Service health</h2><p id="health"></p></section>
+  <section>
+    <h2>Preview a rename</h2>
+    <form id="preview">
+      <label>Sport <select name="sport"><option value="nfl">NFL</option><option value="ufc">UFC</option></select></label>
+      <label>Filename <input name="filename" required></label><button>Preview</button>
+    </form>
+    <pre id="result" aria-live="polite"></pre>
+  </section>
+  <section>
+    <header><h2>Recent jobs</h2><button id="refresh">Refresh</button></header>
+    <div class="table"><table><thead><tr><th>Job</th><th>Video</th><th>Move</th><th>Metadata</th><th>Action</th></tr></thead>
+    <tbody id="jobs"></tbody></table></div>
+  </section>
+  <section>
+    <h2>Update existing Chiefs games</h2>
+    <p>Preview Edition, Summary, Collections, and missing posters for games already in Plex. Existing posters and video files stay in place.</p>
+    <button id="scan">Preview library</button>
+    <button id="next" hidden>Next page</button>
+    <button id="apply" hidden>Apply selected</button>
+    <div id="backfill"></div>
+  </section>
+</main>
+<script>
+  const byId = id => document.getElementById(id);
+  let token = '';
+  let nextPage = null;
+  async function request(path, body) {
+    const options = {headers: {Authorization: 'Bearer ' + token}};
+    if (body !== undefined) {
+      options.method = 'POST';
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
+    }
+    const response = await fetch(path, options);
+    const data = await response.json();
+    if (!response.ok && !(path === '/health' && response.status === 503)) {
+      throw new Error(data.error || 'Request failed');
+    }
+    return data;
+  }
+  function message(text) { byId('message').textContent = text; }
+  function signedIn(active) {
+    byId('signin').hidden = active;
+    byId('signin').style.display = active ? 'none' : '';
+    byId('signout').hidden = !active;
+    byId('dashboard').hidden = !active;
+  }
+  async function refresh() {
+    const [health, data] = await Promise.all([request('/health'), request('/jobs')]);
+    byId('health').textContent = [
+      health.healthy ? 'Healthy' : 'Needs attention', health.version, health.watch_mode,
+      health.dry_run ? 'Dry run enabled' : 'Live moves enabled', health.worker_error
+    ].filter(Boolean).join(' · ');
+    byId('jobs').replaceChildren();
+    for (const job of data.jobs) {
+      const row = byId('jobs').insertRow();
+      for (const value of [
+        job.id, [job.title || job.filename, job.destination].filter(Boolean).join(' — '),
+        [job.status, job.error].filter(Boolean).join(' — '),
+        [job.metadata, job.metadata_error].filter(Boolean).join(' — ')
+      ]) row.insertCell().textContent = value;
+      const actions = row.insertCell();
+      const action = ['review', 'previewed'].includes(job.status) ? 'retry' :
+        job.status === 'completed' && job.sport === 'nfl' ? 'retry-metadata' : '';
+      if (!action) continue;
+      const button = document.createElement('button');
+      button.textContent = action === 'retry' ? 'Retry move' : 'Retry metadata';
+      button.onclick = async () => {
+        if (action === 'retry' && !confirm('Retry this video move?')) return;
+        button.disabled = true;
+        try {
+          await request('/jobs/' + job.id + '/' + action, {});
+          message('Job #' + job.id + ' queued.');
+          await refresh();
+        } catch (error) { message(error.message); }
+        finally { button.disabled = false; }
+      };
+      actions.append(button);
+    }
+  }
+  byId('signin').onsubmit = async event => {
+    event.preventDefault();
+    token = new FormData(event.target).get('token');
+    event.target.reset();
+    try { await refresh(); signedIn(true); message(''); }
+    catch (error) { token = ''; message(error.message); }
+  };
+  byId('signout').onclick = () => {
+    token = '';
+    for (const id of ['jobs', 'result', 'health', 'backfill']) byId(id).replaceChildren();
+    nextPage = null;
+    byId('next').hidden = byId('apply').hidden = true;
+    signedIn(false);
+    message('');
+  };
+  byId('refresh').onclick = () => refresh().catch(error => message(error.message));
+  byId('preview').onsubmit = async event => {
+    event.preventDefault();
+    try {
+      const result = await request('/preview', Object.fromEntries(new FormData(event.target)));
+      byId('result').textContent = JSON.stringify(result, null, 2);
+    } catch (error) { byId('result').textContent = error.message; }
+  };
+  async function scan(start) {
+    byId('scan').disabled = byId('next').disabled = byId('apply').disabled = true;
+    try {
+      const data = await request('/backfill/preview', {start});
+      if (!token) return;
+      byId('backfill').replaceChildren();
+      nextPage = data.next;
+      byId('next').hidden = nextPage === null;
+      byId('apply').hidden = !data.items.some(item => item.signature);
+      for (const item of data.items) {
+        const card = document.createElement('section');
+        const label = document.createElement('label');
+        label.textContent = item.title || 'Plex item';
+        if (item.signature) {
+          const choice = document.createElement('input');
+          choice.type = 'checkbox';
+          choice.dataset.id = item.id;
+          choice.dataset.signature = item.signature;
+          label.prepend(choice);
+        }
+        const preview = document.createElement('pre');
+        const changes = Object.entries(item.changes || {}).map(([key, value]) =>
+          (key.startsWith('collection[') ? 'Collection' :
+            ({editionTitle: 'Edition', summary: 'Summary'}[key.replace('.value', '')] || key)) + ': ' + value);
+        preview.textContent = [...changes, item.poster, item.warning].filter(Boolean).join('\n') || 'No proposed changes';
+        card.append(label, preview);
+        byId('backfill').append(card);
+      }
+      message(data.items.length ? 'Preview ready.' : 'No Plex movies on this page.');
+    } catch (error) { message(error.message); }
+    finally { byId('scan').disabled = byId('next').disabled = byId('apply').disabled = false; }
+  }
+  byId('scan').onclick = () => scan(0);
+  byId('next').onclick = () => scan(nextPage);
+  byId('apply').onclick = async () => {
+    const selected = [...byId('backfill').querySelectorAll('input:checked')];
+    if (!selected.length || !confirm('Apply updates to ' + selected.length + ' selected Plex games?')) return;
+    byId('scan').disabled = byId('next').disabled = byId('apply').disabled = true;
+    try {
+      for (const choice of selected) {
+        if (!token) break;
+        const preview = choice.closest('section').querySelector('pre');
+        try {
+          await request('/backfill/apply', choice.dataset);
+          preview.textContent = 'Updated in Plex.';
+          choice.checked = false;
+          choice.disabled = true;
+        } catch (error) { preview.textContent = error.message; }
+      }
+    } finally { byId('scan').disabled = byId('next').disabled = byId('apply').disabled = false; }
+  };
+</script>
+</html>

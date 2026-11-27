@@ -12,6 +12,7 @@ import re
 import signal
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -26,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from nfl_metadata import Plex, base_url, chiefs_game_details, poster_for
 
 LOG = logging.getLogger("organizer")
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 VIDEOS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts", ".webm"}
 SCHEDULE_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv"
 
@@ -155,6 +156,10 @@ def nfl_title(filename, rows):
         # Use the schedule's official away/home designations for neutral-site
         # games too; Sportarr's display order must never dictate output order.
         away, home = team(row["away_team"]), team(row["home_team"])
+    return nfl_game_title(row, away, home)
+
+
+def nfl_game_title(row, away, home):
     season = int(row["season"])
     kind = row["game_type"]
     if kind == "REG":
@@ -418,6 +423,7 @@ class Organizer:
         self.wake = threading.Event()
         self.last_poll = 0
         self.worker_error = None
+        self.backfill_lock = threading.Lock()
         self.thread = None
         self.schedule = None
         self.schedule_loaded = 0
@@ -724,23 +730,7 @@ class Organizer:
                 game_error = None
                 try:
                     row, _, _ = nfl_game(job["filename"], self.schedule_rows())
-                    away, home = team(row["away_team"]), team(row["home_team"])
-                    details = {}
-                    if "KC" in (away, home):
-                        side, opponent = ("away", home) if away == "KC" else ("home", away)
-                        collections.append(SHORT[opponent])
-                        starter = (row.get(side + "_qb_name") or "").strip()
-                        if starter:
-                            collections.append(starter)
-                        else:
-                            game_error = "Kansas City's starting quarterback is unavailable in nflverse"
-                        try:
-                            details = chiefs_game_details(int(row["season"]), game_date, SHORT[opponent])
-                        except (OSError, ValueError):
-                            LOG.info("Wikipedia game details unavailable for NFL job %s", job["id"])
-                    summary = nfl_preview(row, away, home, details)
-                    if details:
-                        basic_summary = nfl_preview(row, away, home)
+                    summary, basic_summary, collections, game_error = self.plex_game_data(row)
                 except ValueError as exc:
                     game_error = str(exc)
                 self.plex.update_game(target, title, game_date, poster, summary=summary,
@@ -757,6 +747,112 @@ class Organizer:
                         metadata_attempts=attempts, metadata_after=time.time() + min(300, 15 * 2 ** (attempts - 1)),
                         metadata_error=error)
             LOG.warning("NFL metadata job %s attempt %s: %s", job["id"], attempts, error)
+
+    def plex_game_data(self, row):
+        away, home = team(row["away_team"]), team(row["home_team"])
+        details = {}
+        collections = []
+        warning = None
+        if "KC" in (away, home):
+            side, opponent = ("away", home) if away == "KC" else ("home", away)
+            collections.append(SHORT[opponent])
+            starter = (row.get(side + "_qb_name") or "").strip()
+            if starter:
+                collections.append(starter)
+            else:
+                warning = "Kansas City's starting quarterback is unavailable in nflverse"
+            try:
+                details = chiefs_game_details(int(row["season"]), row["gameday"], SHORT[opponent])
+            except (OSError, ValueError):
+                LOG.info("Wikipedia game details unavailable for %s", row["gameday"])
+        basic_summary = nfl_preview(row, away, home) if details else None
+        return nfl_preview(row, away, home, details), basic_summary, collections, warning
+
+    def backfill_index(self, rows):
+        index = {}
+        for row in rows:
+            try:
+                away, home = team(row["away_team"]), team(row["home_team"])
+                if "KC" not in (away, home):
+                    continue
+                title = nfl_game_title(row, away, home)
+            except ValueError:
+                continue
+            index.setdefault(title.casefold(), []).append(row)
+        return index
+
+    def backfill_plan(self, details, rows, index):
+        paths = {part.get("file") for part in details.findall("Media/Part") if part.get("file")}
+        if len(paths) != 1:
+            raise ValueError("Expected one file for this Plex item")
+        path = PurePosixPath(paths.pop())
+        root = PurePosixPath(self.c.plex_nfl_root)
+        if not path.is_relative_to(root) or ".." in path.parts or path.suffix.lower() not in VIDEOS:
+            raise ValueError("Video is outside the configured NFL folder")
+        matches = index.get(path.stem.casefold(), [])
+        if len(matches) > 1:
+            raise ValueError("More than one NFL game matches the filename")
+        if matches:
+            row = matches[0]
+        else:
+            row, _, _ = nfl_game(path.name, rows)
+            if "KC" not in (team(row["away_team"]), team(row["home_team"])):
+                raise ValueError("This file does not match a Chiefs game")
+        title = nfl_game_title(row, team(row["away_team"]), team(row["home_team"]))
+        summary, basic_summary, collections, warning = self.plex_game_data(row)
+        changes, locked = self.plex.game_changes(details, title, row["gameday"], summary=summary,
+                                                 basic_summary=basic_summary, collections=collections,
+                                                 preserve_existing=True)
+        artwork = None
+        if self.game_thumbs and not details.get("thumb") and not {"thumb", "poster"} & locked:
+            artwork = [SHORT[team(row[side + "_team"])] for side in ("away", "home")]
+        return str(path), changes, artwork, warning
+
+    def backfill_signature(self, key, path, changes, artwork):
+        message = json.dumps([key, path, changes, artwork], sort_keys=True).encode()
+        return hmac.new(self.c.token.encode(), b"plex-backfill:" + message, "sha256").hexdigest()
+
+    def backfill_preview(self, start):
+        if not self.plex:
+            raise ValueError("Configure Plex before scanning the NFL library")
+        if type(start) is not int or start < 0:
+            raise ValueError("Invalid library page")
+        videos, total = self.plex.videos_page(start, size=10)
+        rows = self.schedule_rows()
+        index = self.backfill_index(rows)
+        items = []
+        for video in videos:
+            key = video.get("ratingKey", "")
+            try:
+                path, changes, artwork, warning = self.backfill_plan(self.plex.game_details(key), rows, index)
+                items.append({"id": key, "title": video.get("title"), "path": path,
+                              "changes": {name: value for name, value in changes.items() if not name.endswith(".locked")},
+                              "poster": "Add Game Thumbs poster" if artwork else None,
+                              "warning": warning,
+                              "signature": self.backfill_signature(key, path, changes, artwork) if changes or artwork else None})
+            except (ValueError, OSError) as exc:
+                items.append({"title": video.get("title"), "warning": self.error_text(exc)})
+        following = start + len(videos)
+        return {"items": items, "next": following if videos and following < total else None}
+
+    def backfill_apply(self, key, signature):
+        if self.c.dry_run or not self.plex:
+            raise ValueError("Applying changes requires DRY_RUN=false and configured Plex")
+        with self.backfill_lock:
+            details = self.plex.game_details(key)
+            section = details.get("librarySectionID")
+            if section != self.plex.section.rsplit("/", 1)[-1]:
+                raise ValueError("Plex item is outside the configured library")
+            rows = self.schedule_rows()
+            path, changes, artwork, _ = self.backfill_plan(details, rows, self.backfill_index(rows))
+            if not hmac.compare_digest(signature, self.backfill_signature(key, path, changes, artwork)):
+                raise ValueError("Plex details changed. Preview this item again before applying.")
+            if artwork:
+                with tempfile.TemporaryDirectory() as folder:
+                    poster = poster_for(Path(folder), self.game_thumbs, *artwork)
+                    self.plex.upload_poster(key, poster)
+            self.plex.apply_game_changes(key, changes)
+        return {"id": key, "status": "updated"}
 
     def poll(self):
         now = time.monotonic()
@@ -868,8 +964,14 @@ def handler_for(service):
 
         def respond(self, status, value):
             body = json.dumps(value).encode()
+            self.send_body(status, body, "application/json")
+
+        def send_body(self, status, body, content_type):
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
@@ -877,10 +979,13 @@ def handler_for(service):
             self.wfile.write(body)
 
         def dispatch(self):
+            path = urllib.parse.urlsplit(self.path).path
+            if self.command == "GET" and path == "/":
+                self.send_body(200, Path(__file__).with_name("dashboard.html").read_bytes(), "text/html; charset=utf-8")
+                return
             if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), ("Bearer " + service.c.token).encode()):
                 self.respond(401, {"error": "Bearer token required"})
                 return
-            path = urllib.parse.urlsplit(self.path).path
             try:
                 if self.command == "GET":
                     if path == "/health":
@@ -908,6 +1013,12 @@ def handler_for(service):
                         raise ValueError("Expected a JSON object")
                     if path == "/preview":
                         self.respond(200, service.preview(body["sport"], body["filename"]))
+                        return
+                    if path == "/backfill/preview":
+                        self.respond(200, service.backfill_preview(body.get("start", 0)))
+                        return
+                    if path == "/backfill/apply":
+                        self.respond(200, service.backfill_apply(body["id"], body["signature"]))
                         return
                     if path == "/webhooks/complete":
                         if body.get("transfer_complete") is not True:
